@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3D ТАНКИ — офлайн (Canvas 2D)</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#05080f;font-family:monospace;color:#8f8}
+  canvas{display:block}
+  #hud{position:absolute;top:8px;left:10px;font-size:12px;line-height:1.5;
+       text-shadow:0 0 6px #000,0 0 2px #000;pointer-events:none;color:#7fd}
+  #hud b{color:#fd6}
+  .lbl{position:absolute;font-size:11px;font-weight:bold;transform:translate(-50%,-50%);
+       text-shadow:0 0 4px #000,0 0 8px #000;pointer-events:none;white-space:nowrap;opacity:.9}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script>
+/* ============================================================
+   3D ТАНКИ — 100% офлайн, без Three.js.
+   Власний міні-3D: вектори, кватерніони, вузли, камера,
+   проєкція + кліпінг, малювання ліній на Canvas 2D.
+   ============================================================ */
+'use strict';
+
+// ---------- утиліти ----------
+const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
+const lerp=(a,b,t)=>a+(b-a)*t;
+const rand=(a,b)=>a+Math.random()*(b-a);
+const D2R=Math.PI/180;
+const smoothstep=t=>t*t*(3-2*t);
+function hash2(x,z){const n=Math.sin(x*127.1+z*311.7)*43758.5453;return n-Math.floor(n);}
+function vnoise(x,z){
+  const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;
+  const u=smoothstep(xf),v=smoothstep(zf);
+  const a=hash2(xi,zi),b=hash2(xi+1,zi),c=hash2(xi,zi+1),d=hash2(xi+1,zi+1);
+  return lerp(lerp(a,b,u),lerp(c,d,u),v);
+}
+
+// ============================================================
+//  МІНІ-3D (замість THREE)
+// ============================================================
+class V3{
+  constructor(x=0,y=0,z=0){this.x=x;this.y=y;this.z=z;}
+  set(x,y,z){this.x=x;this.y=y;this.z=z;return this;}
+  copy(v){this.x=v.x;this.y=v.y;this.z=v.z;return this;}
+  clone(){return new V3(this.x,this.y,this.z);}
+  add(v){this.x+=v.x;this.y+=v.y;this.z+=v.z;return this;}
+  sub(v){this.x-=v.x;this.y-=v.y;this.z-=v.z;return this;}
+  multiplyScalar(s){this.x*=s;this.y*=s;this.z*=s;return this;}
+  addScaledVector(v,s){this.x+=v.x*s;this.y+=v.y*s;this.z+=v.z*s;return this;}
+  dot(v){return this.x*v.x+this.y*v.y+this.z*v.z;}
+  length(){return Math.hypot(this.x,this.y,this.z);}
+  normalize(){const l=this.length()||1;return this.multiplyScalar(1/l);}
+  distanceTo(v){return Math.hypot(this.x-v.x,this.y-v.y,this.z-v.z);}
+  lerp(v,t){this.x+=(v.x-this.x)*t;this.y+=(v.y-this.y)*t;this.z+=(v.z-this.z)*t;return this;}
+  applyQuaternion(q){
+    const x=this.x,y=this.y,z=this.z,qx=q.x,qy=q.y,qz=q.z,qw=q.w;
+    const ix=qw*x+qy*z-qz*y, iy=qw*y+qz*x-qx*z, iz=qw*z+qx*y-qy*x, iw=-qx*x-qy*y-qz*z;
+    this.x=ix*qw+iw*-qx+iy*-qz-iz*-qy;
+    this.y=iy*qw+iw*-qy+iz*-qx-ix*-qz;
+    this.z=iz*qw+iw*-qz+ix*-qy-iy*-qx;
+    return this;
+  }
+}
+
+class Quat{
+  constructor(x=0,y=0,z=0,w=1){this.x=x;this.y=y;this.z=z;this.w=w;}
+  copy(q){this.x=q.x;this.y=q.y;this.z=q.z;this.w=q.w;return this;}
+  clone(){return new Quat(this.x,this.y,this.z,this.w);}
+  invert(){this.x=-this.x;this.y=-this.y;this.z=-this.z;return this;}
+  multiply(b){ // this = this * b
+    const ax=this.x,ay=this.y,az=this.z,aw=this.w,bx=b.x,by=b.y,bz=b.z,bw=b.w;
+    this.x=ax*bw+aw*bx+ay*bz-az*by;
+    this.y=ay*bw+aw*by+az*bx-ax*bz;
+    this.z=az*bw+aw*bz+ax*by-ay*bx;
+    this.w=aw*bw-ax*bx-ay*by-az*bz;
+    return this;
+  }
+  setAxisAngle(ax,ay,az,ang){
+    const s=Math.sin(ang/2);
+    this.x=ax*s;this.y=ay*s;this.z=az*s;this.w=Math.cos(ang/2);
+    return this;
+  }
+  setFromUnitVectors(a,b){
+    let r=a.dot(b)+1,x,y,z;
+    if(r<1e-6){ r=0;
+      if(Math.abs(a.x)>Math.abs(a.z)){x=-a.y;y=a.x;z=0;}else{x=0;y=-a.z;z=a.y;}
+    }else{
+      x=a.y*b.z-a.z*b.y; y=a.z*b.x-a.x*b.z; z=a.x*b.y-a.y*b.x;
+    }
+    const l=Math.hypot(x,y,z,r)||1;
+    this.x=x/l;this.y=y/l;this.z=z/l;this.w=r/l;
+    return this;
+  }
+}
+function quatMat(q){
+  const x=q.x,y=q.y,z=q.z,w=q.w;
+  const xx=x*x,yy=y*y,zz=z*z,xy=x*y,xz=x*z,yz=y*z,wx=w*x,wy=w*y,wz=w*z;
+  return [1-2*(yy+zz),2*(xy-wz),2*(xz+wy),
+          2*(xy+wz),1-2*(xx+zz),2*(yz-wx),
+          2*(xz-wy),2*(yz+wx),1-2*(xx+yy)];
+}
+
+// вузол сцени з батьком (group / turret / barrel / muzzle)
+class Node{
+  constructor(parent=null){this.parent=parent;this.p=new V3();this.q=new Quat();}
+  worldQuat(){return this.parent?this.parent.worldQuat().multiply(this.q):this.q.clone();}
+  worldPos(){
+    if(!this.parent) return this.p.clone();
+    return this.p.clone().applyQuaternion(this.parent.worldQuat()).add(this.parent.worldPos());
+  }
+}
+
+// ---------- камера + проєкція ----------
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+let W=0,H=0,DPR=1,focal=1;
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1,1.5);
+  W=innerWidth;H=innerHeight;
+  cv.width=Math.round(W*DPR);cv.height=Math.round(H*DPR);
+  cv.style.width=W+'px';cv.style.height=H+'px';
+  focal=(H/2)/Math.tan(30*D2R); // fov 60°
+}
+addEventListener('resize',resize);resize();
+
+const NEAR=0.5;
+const cam={x:0,y:0,z:0,rx:1,ry:0,rz:0,ux:0,uy:1,uz:0,fx:0,fy:0,fz:1};
+function camLookAt(p,t){
+  let fx=t.x-p.x,fy=t.y-p.y,fz=t.z-p.z;
+  const fl=Math.hypot(fx,fy,fz)||1;fx/=fl;fy/=fl;fz/=fl;
+  let rx=-fz,ry=0,rz=fx;
+  const rl=Math.hypot(rx,rz);
+  if(rl<1e-6){rx=1;rz=0;}else{rx/=rl;rz/=rl;}
+  cam.x=p.x;cam.y=p.y;cam.z=p.z;
+  cam.fx=fx;cam.fy=fy;cam.fz=fz;
+  cam.rx=rx;cam.ry=ry;cam.rz=rz;
+  cam.ux=ry*fz-rz*fy; cam.uy=rz*fx-rx*fz; cam.uz=rx*fy-ry*fx;
+}
+// 3D-відрізок з відсіканням по near-площині → у Path2D/ctx
+function seg(p,ax,ay,az,bx,by,bz){
+  let dx=ax-cam.x,dy=ay-cam.y,dz=az-cam.z;
+  let x1=dx*cam.rx+dy*cam.ry+dz*cam.rz, y1=dx*cam.ux+dy*cam.uy+dz*cam.uz, z1=dx*cam.fx+dy*cam.fy+dz*cam.fz;
+  dx=bx-cam.x;dy=by-cam.y;dz=bz-cam.z;
+  let x2=dx*cam.rx+dy*cam.ry+dz*cam.rz, y2=dx*cam.ux+dy*cam.uy+dz*cam.uz, z2=dx*cam.fx+dy*cam.fy+dz*cam.fz;
+  if(z1<NEAR&&z2<NEAR) return;
+  if(z1<NEAR){const t=(NEAR-z1)/(z2-z1);x1+=(x2-x1)*t;y1+=(y2-y1)*t;z1=NEAR;}
+  else if(z2<NEAR){const t=(NEAR-z2)/(z1-z2);x2+=(x1-x2)*t;y2+=(y1-y2)*t;z2=NEAR;}
+  p.moveTo(W/2+x1/z1*focal,H/2-y1/z1*focal);
+  p.lineTo(W/2+x2/z2*focal,H/2-y2/z2*focal);
+}
+const _pr={x:0,y:0,z:0};
+function project(x,y,z){
+  const dx=x-cam.x,dy=y-cam.y,dz=z-cam.z;
+  const vz=dx*cam.fx+dy*cam.fy+dz*cam.fz;
+  if(vz<NEAR) return null;
+  const vx=dx*cam.rx+dy*cam.ry+dz*cam.rz, vy=dx*cam.ux+dy*cam.uy+dz*cam.uz;
+  _pr.x=W/2+vx/vz*focal;_pr.y=H/2-vy/vz*focal;_pr.z=vz;
+  return _pr;
+}
+
+// ---------- світ ----------
+const WORLD=3000, HALF=WORLD/2, GRID=160;
+const GRAV=45, BLAST=30, MAX_SHELLS=90, MAX_TANKS=12;
+
+// ============================================================
+//  РЕЛЬЄФ
+// ============================================================
+function terrainFn(x,z){
+  let h=0;
+  h+=70*Math.sin(x*0.0013)*Math.cos(z*0.0011);
+  h+=45*Math.sin((x+z)*0.0019+1.2);
+  h+=25*Math.cos((x-z)*0.0027+0.4);
+  const ridge=Math.sin(x*0.0021+0.5)*Math.cos(z*0.0019-0.8);
+  const steps=1+Math.floor((ridge*0.5+0.5)*10.999);
+  const mask=Math.max(0,Math.sin(x*0.0016+2.1)*Math.cos(z*0.0014+0.3));
+  h+=steps*5*mask;
+  h+=26*(vnoise(x*0.010,z*0.010)-0.5);
+  h+=8 *(vnoise(x*0.042,z*0.042)-0.5);
+  h-=30*Math.pow(vnoise(x*0.005+11.3,z*0.005+7.7),3);
+  return h;
+}
+const G1=GRID+1;
+const heights=new Float32Array(G1*G1);
+const XS=new Float32Array(G1);
+for(let i=0;i<=GRID;i++) XS[i]=-HALF+(i/GRID)*WORLD;
+for(let i=0;i<=GRID;i++)for(let j=0;j<=GRID;j++) heights[i*G1+j]=terrainFn(XS[i],XS[j]);
+
+function heightAt(x,z){
+  const fx=(x+HALF)/WORLD*GRID, fz=(z+HALF)/WORLD*GRID;
+  let i=Math.floor(fx), j=Math.floor(fz);
+  i=clamp(i,0,GRID-1); j=clamp(j,0,GRID-1);
+  const u=clamp(fx-i,0,1), v=clamp(fz-j,0,1);
+  const h00=heights[i*G1+j], h10=heights[(i+1)*G1+j];
+  const h01=heights[i*G1+j+1], h11=heights[(i+1)*G1+j+1];
+  return lerp(lerp(h00,h10,u),lerp(h01,h11,u),v);
+}
+function normalAt(x,z){
+  const e=4;
+  return new V3(heightAt(x-e,z)-heightAt(x+e,z),2*e,heightAt(x,z-e)-heightAt(x,z+e)).normalize();
+}
+
+// ---- малювання рельєфу: 8 кольорових відер × 3 смуги відстані ----
+const PXs=new Float32Array(G1*G1),PYs=new Float32Array(G1*G1),PZs=new Float32Array(G1*G1);
+const TCOL=[];
+for(let k=0;k<8;k++){
+  const t=(k+0.5)/8;
+  TCOL.push('hsl('+((0.36-0.20*t)*360).toFixed(0)+','+((0.55-0.25*t)*100).toFixed(0)+'%,'+((0.16+0.42*t)*100).toFixed(0)+'%)');
+}
+const BAND_ALPHA=[0.85,0.5,0.22];
+function drawTerrain(){
+  for(let i=0;i<=GRID;i++){
+    const x=XS[i];
+    for(let j=0;j<=GRID;j++){
+      const idx=i*G1+j;
+      const dx=x-cam.x,dy=heights[idx]-cam.y,dz=XS[j]-cam.z;
+      const vz=dx*cam.fx+dy*cam.fy+dz*cam.fz;
+      PZs[idx]=vz;
+      if(vz>=NEAR){
+        PXs[idx]=W/2+(dx*cam.rx+dy*cam.ry+dz*cam.rz)/vz*focal;
+        PYs[idx]=H/2-(dx*cam.ux+dy*cam.uy+dz*cam.uz)/vz*focal;
+      }
+    }
+  }
+  const paths=[];
+  for(let n=0;n<24;n++) paths.push(new Path2D());
+  const M=60;
+  function edge(a,b){
+    const za=PZs[a],zb=PZs[b];
+    if(za<NEAR||zb<NEAR) return;
+    const ax=PXs[a],ay=PYs[a],bx=PXs[b],by=PYs[b];
+    if((ax<-M&&bx<-M)||(ax>W+M&&bx>W+M)||(ay<-M&&by<-M)||(ay>H+M&&by>H+M)) return;
+    const d=za>zb?za:zb;
+    if(d>3000) return;
+    const band=d<1000?0:(d<1900?1:2);
+    const t=clamp(((heights[a]+heights[b])*0.5+80)/260,0,1);
+    const p=paths[band*8+Math.min(7,(t*8)|0)];
+    p.moveTo(ax,ay);p.lineTo(bx,by);
+  }
+  for(let i=0;i<=GRID;i++)for(let j=0;j<GRID;j++) edge(i*G1+j,i*G1+j+1);
+  for(let j=0;j<=GRID;j++)for(let i=0;i<GRID;i++) edge(i*G1+j,(i+1)*G1+j);
+  ctx.lineWidth=1;
+  for(let band=0;band<3;band++){
+    ctx.globalAlpha=BAND_ALPHA[band];
+    for(let k=0;k<8;k++){ctx.strokeStyle=TCOL[k];ctx.stroke(paths[band*8+k]);}
+  }
+  ctx.globalAlpha=1;
+}
+
+// ---- дороги ----
+const roads=[];
+(function buildRoads(){
+  for(let r=0;r<5;r++){
+    const seed=r*17.3, pts=[];
+    for(let t=0;t<=180;t++){
+      const u=t/180, x=-HALF+u*WORLD;
+      const z=Math.sin(u*6.283+seed)*430+Math.cos(u*3.1+seed)*190;
+      if(Math.abs(z)>HALF) continue;
+      pts.push(x,heightAt(x,z)+0.8,z);
+    }
+    roads.push(pts);
+  }
+})();
+function drawRoads(){
+  const p=new Path2D();
+  for(const r of roads)for(let i=0;i+5<r.length;i+=3) seg(p,r[i],r[i+1],r[i+2],r[i+3],r[i+4],r[i+5]);
+  ctx.globalAlpha=0.55;ctx.strokeStyle='#8a7a3a';ctx.lineWidth=1;ctx.stroke(p);ctx.globalAlpha=1;
+}
+
+// ---- хмарки: дуги з малих дуг ----
+const clouds=[];
+(function makeClouds(){
+  for(let i=0;i<22;i++){
+    const segs=[], n=3+Math.floor(Math.random()*4);
+    for(let k=0;k<n;k++){
+      const r=30+Math.random()*65, ns=6+Math.floor(Math.random()*7);
+      const ox=(Math.random()-0.5)*r*1.8, oy=(Math.random()-0.5)*12, oz=(Math.random()-0.5)*20;
+      let prev=null;
+      for(let s=0;s<=ns;s++){
+        const a=Math.PI*(0.05+0.90*s/ns);
+        const pt=[Math.cos(a)*r+ox,Math.sin(a)*r*0.5+oy,oz];
+        if(prev) segs.push(prev[0],prev[1],prev[2],pt[0],pt[1],pt[2]);
+        prev=pt;
+      }
+    }
+    clouds.push({x:rand(-HALF*1.4,HALF*1.4),y:rand(450,820),z:rand(-HALF*1.4,HALF*1.4),segs});
+  }
+})();
+function drawClouds(){
+  const p=new Path2D();
+  for(const c of clouds){
+    const s=c.segs;
+    for(let i=0;i<s.length;i+=6) seg(p,s[i]+c.x,s[i+1]+c.y,s[i+2]+c.z,s[i+3]+c.x,s[i+4]+c.y,s[i+5]+c.z);
+  }
+  ctx.globalAlpha=0.22;ctx.strokeStyle='#8fa4bb';ctx.lineWidth=1;ctx.stroke(p);ctx.globalAlpha=1;
+}
+
+// ============================================================
+//  ГЕОМЕТРІЯ ТАНКА (плоскі масиви відрізків)
+// ============================================================
+function flat(pairs){const f=new Float32Array(pairs.length*3);
+  pairs.forEach((p,i)=>{f[i*3]=p[0];f[i*3+1]=p[1];f[i*3+2]=p[2];});return f;}
+
+function trapezoid(b,t){
+  const a=[];
+  for(let i=0;i<4;i++){a.push(b[i],b[(i+1)%4]);a.push(t[i],t[(i+1)%4]);a.push(b[i],t[i]);}
+  return a;
+}
+const GEO_BODY=flat(trapezoid(
+  [[-3,0,-1.3],[3,0,-1.3],[3,0,1.3],[-3,0,1.3]],
+  [[-2.1,1.4,-1.0],[2.1,1.4,-1.0],[2.1,1.4,1.0],[-2.1,1.4,1.0]]));
+const GEO_TURRET=flat(trapezoid(
+  [[-1.0,0,-0.9],[1.0,0,-0.9],[1.0,0,0.9],[-1.0,0,0.9]],
+  [[-0.8,1.0,-0.65],[0.8,1.0,-0.65],[0.8,1.0,0.65],[-0.8,1.0,0.65]]));
+
+// колесо = низькополігональна сфера (5 меридіанів + 2 кільця)
+function sphereSegs(r,ox,oy,oz){
+  const a=[], N=5, ring=(th)=>{
+    const y=Math.cos(th)*r, rr=Math.sin(th)*r, pts=[];
+    for(let i=0;i<N;i++){const f=i/N*Math.PI*2;pts.push([Math.cos(f)*rr+ox,y+oy,Math.sin(f)*rr+oz]);}
+    return pts;
+  };
+  const top=[ox,oy+r,oz],bot=[ox,oy-r,oz],r1=ring(Math.PI/3),r2=ring(2*Math.PI/3);
+  for(let i=0;i<N;i++){
+    a.push(top,r1[i]);a.push(r1[i],r2[i]);a.push(r2[i],bot);
+    a.push(r1[i],r1[(i+1)%N]);a.push(r2[i],r2[(i+1)%N]);
+  }
+  return a;
+}
+const GEO_WHEELS=(function(){
+  const a=[];
+  for(const side of [-1,1])for(let k=0;k<6;k++) a.push(...sphereSegs(0.5,-2.4+k*0.96,0.5,side*1.35));
+  return flat(a);
+})();
+const GEO_BARREL=(function(){
+  const x0=0,x1=4.2,s=0.1,a=[],c=[[-s,-s],[s,-s],[s,s],[-s,s]];
+  for(let i=0;i<4;i++){
+    a.push([x0,c[i][0],c[i][1]],[x1,c[i][0],c[i][1]]);
+    a.push([x0,c[i][0],c[i][1]],[x0,c[(i+1)%4][0],c[(i+1)%4][1]]);
+    a.push([x1,c[i][0],c[i][1]],[x1,c[(i+1)%4][0],c[(i+1)%4][1]]);
+  }
+  return flat(a);
+})();
+
+function drawGeo(path,geo,node){
+  const q=node.worldQuat(), p=node.worldPos(), m=quatMat(q);
+  for(let i=0;i<geo.length;i+=6){
+    const x1=geo[i],y1=geo[i+1],z1=geo[i+2],x2=geo[i+3],y2=geo[i+4],z2=geo[i+5];
+    seg(path,
+      m[0]*x1+m[1]*y1+m[2]*z1+p.x, m[3]*x1+m[4]*y1+m[5]*z1+p.y, m[6]*x1+m[7]*y1+m[8]*z1+p.z,
+      m[0]*x2+m[1]*y2+m[2]*z2+p.x, m[3]*x2+m[4]*y2+m[5]*z2+p.y, m[6]*x2+m[7]*y2+m[8]*z2+p.z);
+  }
+}
+
+// ============================================================
+//  ТАНК
+// ============================================================
+const TANK_COLORS=[0x44ff88,0x44aaff,0xffdd44,0xff66cc,0x66ffff,
+                   0x99ff44,0xffaa33,0xaa88ff,0x88ffcc,0xffee88,
+                   0x66ffaa,0xff8855];
+const tanks=[], shells=[], explosions=[], fadingLines=[];
+
+function randomSpawn(){
+  for(let k=0;k<60;k++){
+    const a=Math.random()*Math.PI*2, r=180+Math.random()*1050;
+    const x=Math.cos(a)*r, z=Math.sin(a)*r;
+    if(Math.abs(x)>HALF-60||Math.abs(z)>HALF-60) continue;
+    if(normalAt(x,z).y>0.86) return new V3(x,heightAt(x,z),z);
+  }
+  return new V3(0,heightAt(0,0),0);
+}
+
+class Tank{
+  constructor(idx,color){
+    this.idx=idx;this.color=color;this.score=0;this.hp=100;this.alive=true;
+    this.cssColor='#'+color.toString(16).padStart(6,'0');
+    this.group=new Node();
+    this.turret=new Node(this.group);this.turret.p.set(-0.3,1.4,0);
+    this.barrel=new Node(this.turret);this.barrel.p.set(0.6,0.5,0);
+    this.muzzle=new Node(this.barrel);this.muzzle.p.set(4.2,0,0);
+    this.speed=220;this.powMul=1;this.aimYawErr=0;
+    this.heading=rand(0,Math.PI*2);
+    this.waypoint=null;this.moveTimer=0;
+    this.fireTimer=rand(1,4);this.shotsLeft=5;this.target=null;
+    this.spawn();
+    this.label=document.createElement('div');
+    this.label.className='lbl';this.label.style.color=this.cssColor;
+    document.body.appendChild(this.label);
+  }
+  setYaw(a){this.turret.q.setAxisAngle(0,1,0,a);}
+  setPitch(a){this.barrel.q.setAxisAngle(0,0,1,a);this.pitch=a;}
+  spawn(){
+    this.group.p.copy(randomSpawn());
+    this.hp=100;this.alive=true;
+    this.heading=rand(0,Math.PI*2);
+    this.waypoint=null;this.moveTimer=0;
+    this.fireTimer=rand(1,4);this.shotsLeft=5;this.target=null;
+    this.setYaw(0);this.setPitch(0);
+    this.alignToGround();
+  }
+  alignToGround(){
+    const p=this.group.p, n=normalAt(p.x,p.z);
+    const qTilt=new Quat().setFromUnitVectors(new V3(0,1,0),n);
+    const qYaw=new Quat().setAxisAngle(0,1,0,this.heading);
+    this.group.q.copy(qTilt).multiply(qYaw);
+  }
+  pickTarget(){
+    const me=this.group.p;
+    const list=tanks.filter(t=>t!==this&&t.alive)
+      .map(t=>({t,d:t.group.p.distanceTo(me)})).sort((a,b)=>a.d-b.d);
+    if(!list.length) return null;
+    if(list.length===1) return list[0].t;
+    return Math.random()<0.66?list[0].t:list[1].t;
+  }
+  aimAt(pos){
+    const gq=this.group.q.clone().invert();
+    const d=pos.clone().sub(this.group.p).applyQuaternion(gq);
+    this.setYaw(Math.atan2(-d.z,d.x)+this.aimYawErr);
+  }
+  computeBarrelPitch(tp){
+    const gp=this.group.p;
+    const dx=tp.x-gp.x,dz=tp.z-gp.z,dist=Math.max(1,Math.hypot(dx,dz)),dy=tp.y-gp.y;
+    const v=this.speed*this.powMul,g=GRAV,v2=v*v;
+    const disc=v2*v2-g*(g*dist*dist+2*dy*v2);
+    let elev;
+    if(disc<0) elev=45*D2R;
+    else{
+      const s=Math.sqrt(disc);
+      elev=Math.min(Math.atan2(v2+s,g*dist),Math.atan2(v2-s,g*dist));
+    }
+    this.setPitch(0);
+    const fwd=new V3(1,0,0).applyQuaternion(this.barrel.worldQuat());
+    const base=Math.asin(clamp(fwd.y,-1,1));
+    return clamp(elev-base,-10*D2R,89*D2R);
+  }
+  update(dt){
+    if(!this.alive) return;
+    this.moveTimer-=dt;
+    if(this.moveTimer<=0||!this.waypoint){
+      this.moveTimer=rand(10,22);
+      const a=Math.random()*Math.PI*2,r=rand(120,420),p=this.group.p;
+      const wx=clamp(p.x+Math.cos(a)*r,-HALF+80,HALF-80);
+      const wz=clamp(p.z+Math.sin(a)*r,-HALF+80,HALF-80);
+      this.waypoint=new V3(wx,heightAt(wx,wz),wz);
+    }
+    if(this.waypoint){
+      const p=this.group.p;
+      const dx=this.waypoint.x-p.x,dz=this.waypoint.z-p.z,d=Math.hypot(dx,dz);
+      if(d>6){
+        const spd=8*dt;
+        p.x+=dx/d*spd;p.z+=dz/d*spd;p.y=heightAt(p.x,p.z);
+        const want=Math.atan2(-dz,dx); // обертання навколо +Y: +X → (cos, 0, -sin)
+        let diff=want-this.heading;
+        while(diff>Math.PI) diff-=Math.PI*2;
+        while(diff<-Math.PI) diff+=Math.PI*2;
+        this.heading+=clamp(diff,-1.6*dt,1.6*dt);
+      }else this.waypoint=null;
+      this.alignToGround();
+    }
+    if(!this.target||!this.target.alive){this.target=this.pickTarget();this.shotsLeft=5;}
+    if(this.target&&this.target.alive){
+      const tp=this.target.group.p.clone();tp.y+=1.2;
+      this.aimAt(tp);
+      this.setPitch(this.computeBarrelPitch(tp));
+    }
+    this.fireTimer-=dt;
+    if(this.fireTimer<=0&&this.target&&this.target.alive){
+      this.fire();
+      this.shotsLeft--;
+      if(this.shotsLeft<=0){
+        this.shotsLeft=5;this.target=this.pickTarget();this.fireTimer=rand(0.8,1.8);
+      }else this.fireTimer=rand(0.75,1.25);
+    }
+  }
+  fire(){
+    if(shells.length>=MAX_SHELLS) return;
+    this.powMul=0.9+Math.random()*0.2;
+    this.aimYawErr=rand(-1,1)*0.6*D2R;
+    const tp=this.target.group.p.clone();tp.y+=1.2;
+    this.aimAt(tp);
+    this.setPitch(this.computeBarrelPitch(tp));
+    const m=this.muzzle.worldPos();
+    const dir=new V3(1,0,0).applyQuaternion(this.muzzle.worldQuat());
+    const vel=dir.multiplyScalar(this.speed*this.powMul);
+    vel.x+=rand(-1,1)*2.5;vel.y+=rand(-1,1)*2.5;vel.z+=rand(-1,1)*2.5;
+    shells.push({pos:m.clone(),vel,muzzle:m.clone(),owner:this,life:0,maxLife:25});
+  }
+  addScore(n){this.score+=n;}
+}
+
+// ============================================================
+//  ВИБУХИ
+// ============================================================
+function explode(pos,owner){
+  explosions.push({x:pos.x,y:pos.y+0.6,z:pos.z,life:2.0,max:2.0});
+  for(const t of tanks){
+    if(!t.alive) continue;
+    const tp=t.group.p;
+    const d=Math.hypot(tp.x-pos.x,tp.y+1.2-pos.y,tp.z-pos.z);
+    if(d<BLAST){
+      t.hp-=140*(1-d/BLAST);
+      if(t.hp<=0) killTank(t,owner);
+    }
+  }
+}
+function killTank(victim,killer){
+  if(!victim.alive) return;
+  victim.alive=false;
+  victim.addScore(-1);
+  if(killer&&killer!==victim) killer.addScore(1);
+  setTimeout(()=>{if(!victim.alive) victim.spawn();},1500);
+}
+
+for(let i=0;i<MAX_TANKS;i++) tanks.push(new Tank(i,TANK_COLORS[i%TANK_COLORS.length]));
+
+// ============================================================
+//  ВІТЕР
+// ============================================================
+const wind=new V3();
+function updateWind(dt){
+  wind.x=clamp(wind.x+rand(-1,1)*1.2*dt,-1.6,1.6);
+  wind.z=clamp(wind.z+rand(-1,1)*1.2*dt,-1.6,1.6);
+}
+
+// ============================================================
+//  СНАРЯДИ
+// ============================================================
+function updateShells(dt){
+  for(let i=shells.length-1;i>=0;i--){
+    const s=shells[i];
+    s.life+=dt;
+    const SUB=5,h=dt/SUB;
+    let hit=null;
+    for(let k=0;k<SUB;k++){
+      s.vel.y-=GRAV*h;s.vel.x+=wind.x*h;s.vel.z+=wind.z*h;
+      s.pos.x+=s.vel.x*h;s.pos.y+=s.vel.y*h;s.pos.z+=s.vel.z*h;
+      const gh=heightAt(s.pos.x,s.pos.z);
+      if(s.pos.y<=gh){s.pos.y=gh;hit='ground';break;}
+      for(const t of tanks){
+        if(!t.alive||t===s.owner) continue;
+        const tp=t.group.p,dx=s.pos.x-tp.x,dy=s.pos.y-(tp.y+1.2),dz=s.pos.z-tp.z;
+        if(dx*dx+dy*dy+dz*dz<25){hit='tank';break;}
+      }
+      if(hit) break;
+      if(Math.abs(s.pos.x)>HALF||Math.abs(s.pos.z)>HALF){hit='ground';break;}
+    }
+    if(hit||s.life>s.maxLife){
+      explode(s.pos.clone(),s.owner);
+      fadingLines.push({a:s.muzzle.clone(),b:s.pos.clone(),life:3.0,max:3.0});
+      shells.splice(i,1);
+    }
+  }
+  for(let i=fadingLines.length-1;i>=0;i--){
+    fadingLines[i].life-=dt;
+    if(fadingLines[i].life<=0) fadingLines.splice(i,1);
+  }
+}
+function updateExplosions(dt){
+  for(let i=explosions.length-1;i>=0;i--){
+    explosions[i].life-=dt;
+    if(explosions[i].life<=0) explosions.splice(i,1);
+  }
+}
+
+// ============================================================
+//  КАМЕРА — 4 режими по 5 секунд
+// ============================================================
+const camState={mode:-1,timer:0,tank:null,shell:null,twoTanks:null,
+  pos:new V3(0,300,600),look:new V3(0,0,0)};
+const MODE_NAMES=['ЗАДНЯ ЧАСТИНА ТАНКА (5с)','ПОЛІТ — 2+ ТАНКИ В КАДРІ (5с)','З ТАНКА / ДУЛО (5с)','У ПОЛЬОТІ ЗІ СНАРЯДОМ (5с)'];
+function pickRandomTank(){
+  const alive=tanks.filter(t=>t.alive);
+  return alive.length?alive[Math.floor(Math.random()*alive.length)]:null;
+}
+function setCamMode(m){
+  camState.mode=m;camState.timer=5.0;
+  if(m===0||m===2) camState.tank=pickRandomTank();
+  else if(m===1){
+    const alive=tanks.filter(t=>t.alive);
+    if(alive.length>=2){
+      const i=Math.floor(Math.random()*alive.length);
+      let j=Math.floor(Math.random()*alive.length);
+      if(j===i) j=(j+1)%alive.length;
+      camState.twoTanks=[alive[i],alive[j]];
+    }else camState.twoTanks=null;
+  }else if(m===3){
+    camState.shell=shells.length?shells[Math.floor(Math.random()*shells.length)]:null;
+    if(!camState.shell) setCamMode(0);
+  }
+}
+function updateCamera(dt){
+  camState.timer-=dt;
+  if(camState.timer<=0) setCamMode((camState.mode+1)%4);
+  const dp=new V3(),dl=new V3(),m=camState.mode;
+  if(m===0&&camState.tank&&camState.tank.alive){
+    const t=camState.tank,fwd=new V3(1,0,0).applyQuaternion(t.group.q);
+    dp.copy(t.group.p).addScaledVector(fwd,-26).add(new V3(0,14,0));
+    dl.copy(t.group.p).add(new V3(0,3,0));
+  }else if(m===1){
+    const tt=camState.twoTanks;
+    if(tt&&tt[0].alive&&tt[1].alive){
+      const a=tt[0].group.p,b=tt[1].group.p;
+      const mid=a.clone().add(b).multiplyScalar(0.5),dist=a.distanceTo(b);
+      dp.copy(mid).add(new V3(0,Math.max(70,dist*0.85),Math.max(90,dist*0.9)));
+      dl.copy(mid);
+    }else{
+      const t=pickRandomTank();
+      if(t){dp.copy(t.group.p).add(new V3(60,90,60));dl.copy(t.group.p);}
+    }
+  }else if(m===2&&camState.tank&&camState.tank.alive){
+    const t=camState.tank,mz=t.muzzle.worldPos();
+    const dir=new V3(1,0,0).applyQuaternion(t.muzzle.worldQuat());
+    dp.copy(mz).addScaledVector(dir,-2).add(new V3(0,0.6,0));
+    dl.copy(mz).addScaledVector(dir,120);
+  }else if(m===3&&camState.shell){
+    const s=camState.shell,dir=s.vel.clone().normalize();
+    dp.copy(s.pos).addScaledVector(dir,-35).add(new V3(0,10,0));
+    dl.copy(s.pos);
+    if(shells.indexOf(s)<0) setCamMode(0);
+  }else{
+    const t=pickRandomTank();
+    if(t){dp.copy(t.group.p).add(new V3(0,40,60));dl.copy(t.group.p);}
+    else{dp.set(0,300,600);dl.set(0,0,0);}
+  }
+  const k=1-Math.exp(-dt*2.6);
+  camState.pos.lerp(dp,k);camState.look.lerp(dl,k);
+  camLookAt(camState.pos,camState.look);
+}
+
+// ============================================================
+//  ПІДПИСИ, ХМАРИ, HUD
+// ============================================================
+function updateLabels(){
+  for(const t of tanks){
+    if(!t.alive){t.label.style.display='none';continue;}
+    const p=project(t.group.p.x,t.group.p.y+9,t.group.p.z);
+    if(!p){t.label.style.display='none';continue;}
+    t.label.style.display='block';
+    t.label.style.left=p.x+'px';t.label.style.top=p.y+'px';
+    t.label.textContent=(t.score>0?'+':'')+t.score;
+  }
+}
+function updateClouds(dt){
+  for(const c of clouds){
+    c.x+=wind.x*dt*22;c.z+=wind.z*dt*22;
+    const L=HALF*1.4;
+    if(c.x>L)c.x=-L;if(c.x<-L)c.x=L;if(c.z>L)c.z=-L;if(c.z<-L)c.z=L;
+  }
+}
+const hud=document.getElementById('hud');
+let hudTimer=0;
+function updateHUD(dt){
+  hudTimer-=dt;if(hudTimer>0) return;hudTimer=0.25;
+  let alive=0;for(const t of tanks) if(t.alive) alive++;
+  const leader=tanks.slice().sort((a,b)=>b.score-a.score)[0];
+  hud.innerHTML=
+    'ТАНКІВ: <b>'+alive+'</b>/'+tanks.length+' &nbsp; СНАРЯДІВ: <b>'+shells.length+'</b><br>'+
+    'КАМЕРА: <b>'+(MODE_NAMES[camState.mode]||'—')+'</b><br>'+
+    'ЛІДЕР: <b>'+(leader?leader.score:'0')+'</b> очок<br>'+
+    'ВІТЕР: <b>'+wind.x.toFixed(2)+' / '+wind.z.toFixed(2)+'</b>';
+}
+
+// ============================================================
+//  РЕНДЕР
+// ============================================================
+function render(){
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.fillStyle='#05080f';ctx.fillRect(0,0,W,H);
+  ctx.lineJoin='round';
+  drawTerrain();
+  drawRoads();
+  drawClouds();
+
+  // вибухи: помаранчевий круг на землі
+  for(const e of explosions){
+    const t=Math.max(0,e.life/e.max),r=BLAST*(1+(1-t)*0.25);
+    ctx.beginPath();let ok=true;
+    for(let i=0;i<22;i++){
+      const a=i/22*Math.PI*2;
+      const p=project(e.x+Math.cos(a)*r,e.y,e.z+Math.sin(a)*r);
+      if(!p){ok=false;break;}
+      if(i===0)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y);
+    }
+    if(ok){ctx.closePath();ctx.globalAlpha=0.42*t;ctx.fillStyle='#ff8800';ctx.fill();}
+  }
+  ctx.globalAlpha=1;
+
+  // танки
+  ctx.lineWidth=1.5;
+  for(const t of tanks){
+    if(!t.alive) continue;
+    const d=Math.hypot(t.group.p.x-cam.x,t.group.p.y-cam.y,t.group.p.z-cam.z);
+    const a=0.95*clamp((2800-d)/1900,0,1);
+    if(a<=0.01) continue;
+    const p=new Path2D();
+    drawGeo(p,GEO_BODY,t.group);
+    drawGeo(p,GEO_WHEELS,t.group);
+    drawGeo(p,GEO_TURRET,t.turret);
+    drawGeo(p,GEO_BARREL,t.barrel);
+    ctx.globalAlpha=a;ctx.strokeStyle=t.cssColor;ctx.stroke(p);
+  }
+
+  // снаряди: червоні лінії дуло → снаряд
+  ctx.strokeStyle='#ff3333';
+  ctx.globalAlpha=0.95;
+  let p=new Path2D();
+  for(const s of shells) seg(p,s.muzzle.x,s.muzzle.y,s.muzzle.z,s.pos.x,s.pos.y,s.pos.z);
+  ctx.stroke(p);
+  for(const f of fadingLines){
+    p=new Path2D();
+    seg(p,f.a.x,f.a.y,f.a.z,f.b.x,f.b.y,f.b.z);
+    ctx.globalAlpha=Math.max(0,f.life/f.max)*0.9;ctx.stroke(p);
+  }
+  ctx.globalAlpha=1;
+}
+
+let last=performance.now();
+function loop(now){
+  requestAnimationFrame(loop);
+  let dt=(now-last)/1000;last=now;
+  if(dt>0.1) dt=0.1;
+  updateWind(dt);updateClouds(dt);
+  for(const t of tanks) t.update(dt);
+  updateShells(dt);updateExplosions(dt);
+  updateCamera(dt);
+  render();
+  updateLabels();updateHUD(dt);
+}
+setCamMode(0);
+camState.pos.set(0,300,600);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
